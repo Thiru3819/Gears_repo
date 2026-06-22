@@ -84,6 +84,7 @@ class _GearWorkspaceState extends State<GearWorkspace> with TickerProviderStateM
   final List<GearConnection> _connections = [];
   String? _selectedGearId;
   String? _draggingGearId;
+  Offset? _dragOffset;
   String? _connectionStartGearId;
   bool _isSimulating = false;
   AnimationController? _simulationController;
@@ -108,6 +109,19 @@ class _GearWorkspaceState extends State<GearWorkspace> with TickerProviderStateM
   double _calculateGearRadius(int teeth) {
     // Radius proportional to teeth count for proper meshing
     return 20 + (teeth * 2.5);
+  }
+
+  // Find gear at a given position
+  String? _findGearAtPosition(Offset position) {
+    // Check in reverse order so we select topmost gear first
+    final gearList = _gears.values.toList();
+    for (int i = gearList.length - 1; i >= 0; i--) {
+      final gear = gearList[i];
+      if ((gear.position - position).distance <= gear.radius) {
+        return gear.id;
+      }
+    }
+    return null;
   }
 
   void _addGear(Offset position) {
@@ -326,32 +340,83 @@ class _GearWorkspaceState extends State<GearWorkspace> with TickerProviderStateM
           Expanded(
             child: GestureDetector(
               onTapDown: (details) {
-                // Check if clicking on empty space
                 final renderBox = context.findRenderObject() as RenderBox;
                 final position = renderBox.globalToLocal(details.globalPosition);
                 
-                bool clickedOnGear = false;
-                for (var gear in _gears.values) {
-                  if ((gear.position - position).distance < gear.radius) {
-                    clickedOnGear = true;
-                    break;
-                  }
-                }
+                // Check if clicking on a gear
+                final gearId = _findGearAtPosition(position);
                 
-                if (!clickedOnGear && _connectionStartGearId == null) {
-                  _addGear(position);
+                if (gearId != null) {
+                  // Clicked on a gear - select it or start connection
+                  setState(() {
+                    if (_connectionStartGearId != null) {
+                      // If we're in connection mode, complete the connection
+                      if (_connectionStartGearId != gearId) {
+                        _addConnection(_connectionStartGearId!, gearId);
+                      }
+                      _connectionStartGearId = null;
+                    } else {
+                      // Just select the gear
+                      _selectedGearId = gearId;
+                    }
+                  });
+                } else {
+                  // Clicked on empty space - deselect and add gear if not in connection mode
+                  setState(() {
+                    if (_connectionStartGearId == null) {
+                      _selectedGearId = null;
+                      _addGear(position);
+                    }
+                  });
                 }
               },
-              child: CustomPaint(
-                painter: GearPainter(
-                  gears: _gears.values.toList(),
-                  connections: _connections,
-                  selectedGearId: _selectedGearId,
-                  connectionStartGearId: _connectionStartGearId,
-                  showTeeth: _showTeeth,
-                  showConnectionLines: _showConnectionLines,
+              onPanStart: (details) {
+                final renderBox = context.findRenderObject() as RenderBox;
+                final position = renderBox.globalToLocal(details.globalPosition);
+                
+                final gearId = _findGearAtPosition(position);
+                if (gearId != null && !_isSimulating) {
+                  setState(() {
+                    _draggingGearId = gearId;
+                    _dragOffset = Offset(
+                      position.dx - _gears[gearId]!.position.dx,
+                      position.dy - _gears[gearId]!.position.dy,
+                    );
+                  });
+                }
+              },
+              onPanUpdate: (details) {
+                if (_draggingGearId != null && !_isSimulating) {
+                  final renderBox = context.findRenderObject() as RenderBox;
+                  final position = renderBox.globalToLocal(details.globalPosition);
+                  
+                  setState(() {
+                    _gears[_draggingGearId]!.position = Offset(
+                      position.dx - _dragOffset!.dx,
+                      position.dy - _dragOffset!.dy,
+                    );
+                  });
+                }
+              },
+              onPanEnd: (details) {
+                setState(() {
+                  _draggingGearId = null;
+                  _dragOffset = null;
+                });
+              },
+              child: MouseRegion(
+                cursor: _draggingGearId != null ? SystemMouseCursors.grabbing : SystemMouseCursors.basic,
+                child: CustomPaint(
+                  painter: GearPainter(
+                    gears: _gears.values.toList(),
+                    connections: _connections,
+                    selectedGearId: _selectedGearId,
+                    connectionStartGearId: _connectionStartGearId,
+                    showTeeth: _showTeeth,
+                    showConnectionLines: _showConnectionLines,
+                  ),
+                  size: Size.infinite,
                 ),
-                size: Size.infinite,
               ),
             ),
           ),
