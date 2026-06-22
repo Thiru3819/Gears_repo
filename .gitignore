@@ -1,21 +1,24 @@
 ```
 # Build artifacts
+*.dart.js
+*.js
+*.map
 build/
 .dart_tool/
-*.g.dart
 
 # Dependencies
 pubspec.lock
 
-# Logs
+# Logs and temp files
 *.log
+*.tmp
 
 # Environment variables
 .env
 .env.local
 *.env.*
 
-# IDE files
+# Editor/IDE
 .vscode/
 .idea/
 *.swp
@@ -27,7 +30,6 @@ Thumbs.db
 
 # Coverage
 coverage/
-
-# Temporary files
-*.tmp
+htmlcov/
+.coverage
 ```

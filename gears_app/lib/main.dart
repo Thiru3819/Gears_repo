@@ -2,669 +2,289 @@ import 'package:flutter/material.dart';
 import 'dart:math' as math;
 
 void main() {
-  runApp(const GearSimulationApp());
+  runApp(const MaterialApp(
+    debugShowCheckedModeBanner: false,
+    home: GearSimulationApp(),
+  ));
 }
 
-class GearSimulationApp extends StatelessWidget {
+class GearSimulationApp extends StatefulWidget {
   const GearSimulationApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Gear Simulation',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        brightness: Brightness.light,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue, brightness: Brightness.dark),
-      ),
-      themeMode: ThemeMode.system,
-      home: const GearWorkspace(),
-    );
-  }
+  State<GearSimulationApp> createState() => _GearSimulationAppState();
 }
 
-// Model for a single gear
-class Gear {
-  String id;
-  Offset position;
-  double radius; // Visual radius in pixels
-  int teethCount;
-  double angle; // Current rotation angle
-  double angularVelocity;
-  bool isFixed; // If true, this gear doesn't move
-  bool isDriver; // If true, this gear is powered
-  List<String> connectedGears; // Gears connected via chain/belt
-  String? compoundWith; // ID of gear this is compounded with (same axle)
-  Color color;
-
-  Gear({
-    required this.id,
-    required this.position,
-    required this.radius,
-    required this.teethCount,
-    this.angle = 0,
-    this.angularVelocity = 0,
-    this.isFixed = false,
-    this.isDriver = false,
-    this.connectedGears = const [],
-    this.compoundWith,
-    Color? color,
-  }) : color = color ?? Colors.grey;
-
-  // Calculate pitch radius based on teeth count (for proper meshing)
-  double get pitchRadius => radius * 0.85;
-}
-
-// Model for a connection between gears (chain or belt)
-class GearConnection {
-  String id;
-  String gear1Id;
-  String gear2Id;
-  bool isCrossed; // If true, belt is crossed (reverses direction)
-
-  GearConnection({
-    required this.id,
-    required this.gear1Id,
-    required this.gear2Id,
-    this.isCrossed = false,
-  });
-}
-
-class GearWorkspace extends StatefulWidget {
-  const GearWorkspace({super.key});
-
-  @override
-  State<GearWorkspace> createState() => _GearWorkspaceState();
-}
-
-class _GearWorkspaceState extends State<GearWorkspace> with TickerProviderStateMixin {
-  final Map<String, Gear> _gears = {};
-  final List<GearConnection> _connections = [];
-  String? _selectedGearId;
-  String? _draggingGearId;
-  Offset? _dragOffset;
-  String? _connectionStartGearId;
-  bool _isSimulating = false;
-  AnimationController? _simulationController;
-  
-  // Properties for new gear
-  int _newTeethCount = 20;
-  double _newSizeMultiplier = 1.0;
-  
-  // Display options
-  bool _showTeeth = true;
-  bool _showConnectionLines = true;
+class _GearSimulationAppState extends State<GearSimulationApp> with TickerProviderStateMixin {
+  final List<Gear> gears = [];
+  Gear? selectedGear;
+  bool isSimulating = false;
+  AnimationController? _animationController;
+  final double baseSpeed = 3.0;
 
   @override
   void dispose() {
-    _simulationController?.dispose();
+    _animationController?.dispose();
     super.dispose();
   }
 
-  String _generateId() => DateTime.now().millisecondsSinceEpoch.toString() + 
-                          math.Random().nextInt(1000).toString();
-
-  double _calculateGearRadius(int teeth) {
-    // Radius proportional to teeth count for proper meshing
-    return 20 + (teeth * 2.5);
+  void _toggleSimulation() {
+    if (isSimulating) {
+      _animationController?.stop();
+    } else {
+      if (_animationController == null) {
+        _animationController = AnimationController(vsync: this, duration: const Duration(seconds: 1))
+          ..addListener(() {
+            setState(() => _updatePhysics());
+          });
+      }
+      _calculateGearTrain();
+      _animationController?.repeat();
+    }
+    setState(() => isSimulating = !isSimulating);
   }
 
-  // Find gear at a given position
-  String? _findGearAtPosition(Offset position) {
-    // Check in reverse order so we select topmost gear first
-    final gearList = _gears.values.toList();
-    for (int i = gearList.length - 1; i >= 0; i--) {
-      final gear = gearList[i];
-      if ((gear.position - position).distance <= gear.radius) {
-        return gear.id;
+  void _updatePhysics() {
+    if (!isSimulating) return;
+    double dt = 0.016;
+    for (var g in gears) {
+      if (!g.isFixed) g.angle += g.angularVelocity * dt;
+    }
+  }
+
+  void _calculateGearTrain() {
+    for (var g in gears) {
+      if (!g.isDriver) g.angularVelocity = 0;
+    }
+    for (var g in gears) {
+      if (g.isDriver) g.angularVelocity = baseSpeed * (g.isReversed ? -1 : 1);
+    }
+
+    bool changed = true;
+    int iterations = 0;
+    while (changed && iterations < 10) {
+      changed = false;
+      iterations++;
+      for (var g in gears) {
+        if (g.angularVelocity == 0 && !g.isFixed) continue;
+        for (var neighborId in g.connectedTo) {
+          var neighbor = gears.firstWhere((x) => x.id == neighborId, orElse: () => gears[0]);
+          if (neighbor.isFixed) continue;
+          double ratio = g.teeth / neighbor.teeth;
+          double expectedVel = -g.angularVelocity * ratio;
+          if (!neighbor.isDriver && (neighbor.angularVelocity == 0 || (neighbor.angularVelocity - expectedVel).abs() > 0.01)) {
+            neighbor.angularVelocity = expectedVel;
+            changed = true;
+          }
+        }
       }
     }
-    return null;
   }
 
   void _addGear(Offset position) {
-    final radius = _calculateGearRadius(_newTeethCount) * _newSizeMultiplier;
-    final gear = Gear(
-      id: _generateId(),
-      position: position,
-      radius: radius,
-      teethCount: _newTeethCount,
-      color: Color((math.Random().nextDouble() * 0xFFFFFF).toInt()).withOpacity(1.0),
-    );
+    for (var g in gears) {
+      double dist = math.sqrt(math.pow(position.dx - g.x, 2) + math.pow(position.dy - g.y, 2));
+      if (dist < g.radius * 1.2) {
+        setState(() {
+          selectedGear = g;
+        });
+        return;
+      }
+    }
     setState(() {
-      _gears[gear.id] = gear;
+      gears.add(Gear(
+        id: DateTime.now().millisecondsSinceEpoch,
+        x: position.dx,
+        y: position.dy,
+        teeth: 20,
+        radius: 30.0,
+        angle: 0,
+        isDriver: false,
+        isFixed: false,
+        isReversed: false,
+        angularVelocity: 0,
+        connectedTo: [],
+      ));
+      selectedGear = gears.last;
+      _checkConnections();
     });
   }
 
-  void _removeGear(String gearId) {
-    setState(() {
-      _gears.remove(gearId);
-      _connections.removeWhere((c) => c.gear1Id == gearId || c.gear2Id == gearId);
-      // Remove compound references
-      for (var gear in _gears.values) {
-        if (gear.compoundWith == gearId) {
-          gear.compoundWith = null;
+  void _checkConnections() {
+    for (var g in gears) g.connectedTo.clear();
+    for (int i = 0; i < gears.length; i++) {
+      for (int j = i + 1; j < gears.length; j++) {
+        var g1 = gears[i];
+        var g2 = gears[j];
+        double dist = math.sqrt(math.pow(g1.x - g2.x, 2) + math.pow(g1.y - g2.y, 2));
+        double idealDist = g1.radius + g2.radius;
+        if ((dist - idealDist).abs() < 8.0) {
+          g1.connectedTo.add(g2.id);
+          g2.connectedTo.add(g1.id);
+          double angle = math.atan2(g2.y - g1.y, g2.x - g1.x);
+          g2.x = g1.x + math.cos(angle) * idealDist;
+          g2.y = g1.y + math.sin(angle) * idealDist;
         }
       }
-      if (_selectedGearId == gearId) {
-        _selectedGearId = null;
+    }
+  }
+
+  void _updateSelectedGear(Property prop, double value) {
+    if (selectedGear == null) return;
+    setState(() {
+      if (prop == Property.teeth) {
+        selectedGear!.teeth = value.toInt();
+        selectedGear!.radius = (selectedGear!.teeth / 20.0) * 30.0;
+        _checkConnections();
       }
     });
   }
 
-  void _toggleDriver(String gearId) {
-    setState(() {
-      for (var gear in _gears.values) {
-        gear.isDriver = false;
-      }
-      _gears[gearId]?.isDriver = !_gears[gearId]!.isDriver;
-    });
-  }
-
-  void _toggleFixed(String gearId) {
-    setState(() {
-      _gears[gearId]?.isFixed = !_gears[gearId]!.isFixed;
-    });
-  }
-
-  void _createCompound(String gearId1, String gearId2) {
-    setState(() {
-      _gears[gearId1]?.compoundWith = gearId2;
-      _gears[gearId2]?.compoundWith = gearId1;
-    });
-  }
-
-  void _addConnection(String gearId1, String gearId2) {
-    // Check if connection already exists
-    final exists = _connections.any((c) => 
-      (c.gear1Id == gearId1 && c.gear2Id == gearId2) ||
-      (c.gear1Id == gearId2 && c.gear2Id == gearId1)
-    );
-    
-    if (!exists && gearId1 != gearId2) {
+  void _deleteSelected() {
+    if (selectedGear != null) {
       setState(() {
-        _connections.add(GearConnection(
-          id: _generateId(),
-          gear1Id: gearId1,
-          gear2Id: gearId2,
-        ));
+        gears.remove(selectedGear);
+        selectedGear = null;
+        _checkConnections();
       });
     }
-  }
-
-  void _startSimulation() {
-    if (_simulationController != null) {
-      _stopSimulation();
-      return;
-    }
-
-    _simulationController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 60),
-    );
-
-    _simulationController!.addListener(() {
-      _updateGearPhysics();
-    });
-
-    setState(() {
-      _isSimulating = true;
-    });
-    _simulationController!.repeat();
-  }
-
-  void _stopSimulation() {
-    _simulationController?.stop();
-    _simulationController?.dispose();
-    _simulationController = null;
-    setState(() {
-      _isSimulating = false;
-    });
-  }
-
-  void _updateGearPhysics() {
-    final dt = 0.016; // Approximate delta time in seconds
-    final baseSpeed = 2.0; // Radians per second
-
-    // Reset velocities
-    for (var gear in _gears.values) {
-      gear.angularVelocity = 0;
-    }
-
-    // Set driver gear velocity
-    for (var gear in _gears.values) {
-      if (gear.isDriver && !gear.isFixed) {
-        gear.angularVelocity = baseSpeed;
-      }
-    }
-
-    // Propagate velocities through meshed gears
-    var changed = true;
-    var iterations = 0;
-    while (changed && iterations < 100) {
-      changed = false;
-      iterations++;
-
-      for (var gear1 in _gears.values) {
-        if (gear1.isFixed) continue;
-
-        for (var gear2 in _gears.values) {
-          if (gear1.id == gear2.id || gear2.isFixed) continue;
-
-          // Check if gears are meshed (touching)
-          final distance = (gear1.position - gear2.position).distance;
-          final meshDistance = gear1.pitchRadius + gear2.pitchRadius;
-          
-          if ((distance - meshDistance).abs() < 5) {
-            // Gears are meshed
-            if (gear1.angularVelocity != 0 && gear2.angularVelocity == 0) {
-              // Transfer velocity from gear1 to gear2
-              final ratio = gear1.teethCount / gear2.teethCount;
-              gear2.angularVelocity = -gear1.angularVelocity * ratio;
-              changed = true;
-            } else if (gear2.angularVelocity != 0 && gear1.angularVelocity == 0) {
-              // Transfer velocity from gear2 to gear1
-              final ratio = gear2.teethCount / gear1.teethCount;
-              gear1.angularVelocity = -gear2.angularVelocity * ratio;
-              changed = true;
-            }
-          }
-        }
-
-        // Handle compound gears
-        if (gear1.compoundWith != null) {
-          final compoundGear = _gears[gear1.compoundWith];
-          if (compoundGear != null && !compoundGear.isFixed) {
-            if (gear1.angularVelocity != 0 && compoundGear.angularVelocity == 0) {
-              compoundGear.angularVelocity = gear1.angularVelocity;
-              changed = true;
-            } else if (compoundGear.angularVelocity != 0 && gear1.angularVelocity == 0) {
-              gear1.angularVelocity = compoundGear.angularVelocity;
-              changed = true;
-            }
-          }
-        }
-      }
-    }
-
-    // Update angles
-    setState(() {
-      for (var gear in _gears.values) {
-        if (!gear.isFixed) {
-          gear.angle += gear.angularVelocity * dt;
-        }
-      }
-    });
-  }
-
-  void _resetSimulation() {
-    _stopSimulation();
-    setState(() {
-      for (var gear in _gears.values) {
-        gear.angle = 0;
-        gear.angularVelocity = 0;
-        gear.isDriver = false;
-      }
-    });
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Gear Simulation'),
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        actions: [
-          IconButton(
-            icon: Icon(_isSimulating ? Icons.pause : Icons.play_arrow),
-            onPressed: _startSimulation,
-            tooltip: _isSimulating ? 'Pause' : 'Play',
-          ),
-          IconButton(
-            icon: const Icon(Icons.stop),
-            onPressed: _resetSimulation,
-            tooltip: 'Reset',
-          ),
-          IconButton(
-            icon: Icon(_showTeeth ? Icons.visibility : Icons.visibility_off),
-            onPressed: () => setState(() => _showTeeth = !_showTeeth),
-            tooltip: 'Toggle Teeth',
-          ),
-        ],
-      ),
-      body: Row(
+      backgroundColor: const Color(0xFF1E1E2E),
+      body: Stack(
         children: [
-          // Main workspace
-          Expanded(
-            child: GestureDetector(
-              onTapDown: (details) {
-                final renderBox = context.findRenderObject() as RenderBox;
-                final position = renderBox.globalToLocal(details.globalPosition);
-                
-                // Check if clicking on a gear
-                final gearId = _findGearAtPosition(position);
-                
-                if (gearId != null) {
-                  // Clicked on a gear - select it or start connection
-                  setState(() {
-                    if (_connectionStartGearId != null) {
-                      // If we're in connection mode, complete the connection
-                      if (_connectionStartGearId != gearId) {
-                        _addConnection(_connectionStartGearId!, gearId);
-                      }
-                      _connectionStartGearId = null;
-                    } else {
-                      // Just select the gear
-                      _selectedGearId = gearId;
-                    }
-                  });
-                } else {
-                  // Clicked on empty space - deselect and add gear if not in connection mode
-                  setState(() {
-                    if (_connectionStartGearId == null) {
-                      _selectedGearId = null;
-                      _addGear(position);
-                    }
-                  });
-                }
-              },
-              onPanStart: (details) {
-                final renderBox = context.findRenderObject() as RenderBox;
-                final position = renderBox.globalToLocal(details.globalPosition);
-                
-                final gearId = _findGearAtPosition(position);
-                if (gearId != null && !_isSimulating) {
-                  setState(() {
-                    _draggingGearId = gearId;
-                    _dragOffset = Offset(
-                      position.dx - _gears[gearId]!.position.dx,
-                      position.dy - _gears[gearId]!.position.dy,
-                    );
-                  });
-                }
-              },
-              onPanUpdate: (details) {
-                if (_draggingGearId != null && !_isSimulating) {
-                  final renderBox = context.findRenderObject() as RenderBox;
-                  final position = renderBox.globalToLocal(details.globalPosition);
-                  
-                  setState(() {
-                    _gears[_draggingGearId]!.position = Offset(
-                      position.dx - _dragOffset!.dx,
-                      position.dy - _dragOffset!.dy,
-                    );
-                  });
-                }
-              },
-              onPanEnd: (details) {
-                setState(() {
-                  _draggingGearId = null;
-                  _dragOffset = null;
-                });
-              },
-              child: MouseRegion(
-                cursor: _draggingGearId != null ? SystemMouseCursors.grabbing : SystemMouseCursors.basic,
-                child: CustomPaint(
-                  painter: GearPainter(
-                    gears: _gears.values.toList(),
-                    connections: _connections,
-                    selectedGearId: _selectedGearId,
-                    connectionStartGearId: _connectionStartGearId,
-                    showTeeth: _showTeeth,
-                    showConnectionLines: _showConnectionLines,
-                  ),
-                  size: Size.infinite,
-                ),
+          GestureDetector(
+            onTapDown: (details) => _addGear(details.localPosition),
+            child: CustomPaint(
+              size: Size.infinite,
+              painter: GearScenePainter(gears: gears, selectedGear: selectedGear),
+              child: Stack(
+                children: gears.map((gear) {
+                  return Positioned(
+                    left: gear.x - gear.radius - 20,
+                    top: gear.y - gear.radius - 20,
+                    width: gear.radius * 2 + 40,
+                    height: gear.radius * 2 + 40,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: () => setState(() => selectedGear = gear),
+                      onPanStart: (_) => setState(() => selectedGear = gear),
+                      onPanUpdate: (details) {
+                        setState(() {
+                          gear.x += details.delta.dx;
+                          gear.y += details.delta.dy;
+                          _checkConnections();
+                        });
+                      },
+                      onPanEnd: (_) => _checkConnections(),
+                      child: Container(),
+                    ),
+                  );
+                }).toList(),
               ),
             ),
           ),
-          // Control panel
-          Container(
-            width: 300,
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHighest,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withOpacity(0.1),
-                  blurRadius: 4,
-                  offset: const Offset(-2, 0),
+          Positioned(
+            top: 20,
+            left: 20,
+            child: _buildControlPanel(),
+          ),
+          Positioned(
+            bottom: 20,
+            right: 20,
+            child: Row(
+              children: [
+                FloatingActionButton.extended(
+                  onPressed: _toggleSimulation,
+                  icon: Icon(isSimulating ? Icons.pause : Icons.play_arrow),
+                  label: Text(isSimulating ? "Pause" : "Simulate"),
+                  backgroundColor: isSimulating ? Colors.orange : Colors.green,
+                ),
+                const SizedBox(width: 10),
+                FloatingActionButton(
+                  onPressed: () {
+                    setState(() {
+                      gears.clear();
+                      selectedGear = null;
+                      isSimulating = false;
+                      _animationController?.stop();
+                    });
+                  },
+                  child: const Icon(Icons.delete_sweep),
+                  backgroundColor: Colors.red,
                 ),
               ],
             ),
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Controls',
-                    style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  // New gear settings
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('New Gear Settings', 
-                              style: TextStyle(fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const Text('Teeth: '),
-                              Expanded(
-                                child: Slider(
-                                  value: _newTeethCount.toDouble(),
-                                  min: 8,
-                                  max: 60,
-                                  divisions: 26,
-                                  label: _newTeethCount.toString(),
-                                  onChanged: (value) {
-                                    setState(() {
-                                      _newTeethCount = value.round();
-                                    });
-                                  },
-                                ),
-                              ),
-                              Text(_newTeethCount.toString()),
-                            ],
-                          ),
-                          Row(
-                            children: [
-                              const Text('Size: '),
-                              Expanded(
-                                child: Slider(
-                                  value: _newSizeMultiplier,
-                                  min: 0.5,
-                                  max: 2.0,
-                                  divisions: 15,
-                                  label: _newSizeMultiplier.toStringAsFixed(1),
-                                  onChanged: (value) {
-                                    setState(() {
-                                      _newSizeMultiplier = value;
-                                    });
-                                  },
-                                ),
-                              ),
-                              Text(_newSizeMultiplier.toStringAsFixed(1)),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  // Selected gear controls
-                  if (_selectedGearId != null && _gears[_selectedGearId] != null) ...[
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Selected Gear', 
-                                style: TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 8),
-                            Text('Teeth: ${_gears[_selectedGearId]!.teethCount}'),
-                            Text('Radius: ${_gears[_selectedGearId]!.radius.toStringAsFixed(1)}'),
-                            const SizedBox(height: 8),
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: ElevatedButton.icon(
-                                    icon: Icon(
-                                      _gears[_selectedGearId]!.isDriver 
-                                        ? Icons.bolt 
-                                        : Icons.bolt_outlined
-                                    ),
-                                    label: const Text('Driver'),
-                                    onPressed: () => _toggleDriver(_selectedGearId!),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: _gears[_selectedGearId]!.isDriver 
-                                        ? Colors.amber 
-                                        : null,
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: ElevatedButton.icon(
-                                    icon: Icon(
-                                      _gears[_selectedGearId]!.isFixed 
-                                        ? Icons.lock 
-                                        : Icons.lock_open
-                                    ),
-                                    label: const Text('Fixed'),
-                                    onPressed: () => _toggleFixed(_selectedGearId!),
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: _gears[_selectedGearId]!.isFixed 
-                                        ? Colors.red 
-                                        : null,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            ElevatedButton.icon(
-                              icon: const Icon(Icons.delete),
-                              label: const Text('Delete Gear'),
-                              onPressed: () {
-                                _removeGear(_selectedGearId!);
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.red,
-                                foregroundColor: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  
-                  // Connection mode
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Connect Gears', 
-                              style: TextStyle(fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          const Text(
-                            'Click two gears to connect them with a belt/chain.',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                          const SizedBox(height: 8),
-                          if (_connectionStartGearId != null)
-                            ElevatedButton(
-                              onPressed: () {
-                                setState(() {
-                                  _connectionStartGearId = null;
-                                });
-                              },
-                              child: const Text('Cancel Connection'),
-                            )
-                          else
-                            const Text(
-                              'Select a gear first, then click "Start Connection"',
-                              style: TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
-                            ),
-                          const SizedBox(height: 8),
-                          ElevatedButton.icon(
-                            icon: const Icon(Icons.link),
-                            label: const Text('Start Connection'),
-                            onPressed: _selectedGearId != null
-                                ? () {
-                                    setState(() {
-                                      _connectionStartGearId = _selectedGearId;
-                                    });
-                                  }
-                                : null,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  // Compound gear creation
-                  if (_selectedGearId != null) ...[
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text('Compound Gears', 
-                                style: TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 8),
-                            const Text(
-                              'Select two overlapping gears to compound them (same axle).',
-                              style: TextStyle(fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                  ],
-                  
-                  // Instructions
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text('Instructions', 
-                              style: TextStyle(fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 8),
-                          const Text(
-                            '• Click on empty space to add a gear\n'
-                            '• Drag gears to move them\n'
-                            '• Select a gear to see options\n'
-                            '• Set a gear as "Driver" to power it\n'
-                            '• Mesh gears together for automatic rotation\n'
-                            '• Use connections for belt/chain drives',
-                            style: TextStyle(fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlPanel() {
+    if (selectedGear == null) {
+      return Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(color: Colors.white.withOpacity(0.1), borderRadius: BorderRadius.circular(12)),
+        child: const Text("Click a gear to edit\nClick empty space to add", style: TextStyle(color: Colors.white70, fontSize: 14)),
+      );
+    }
+    return Container(
+      width: 200,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFF2D2D44), borderRadius: BorderRadius.circular(12), border: Border.all(color: Colors.white24)),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text("Gear Properties", style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16)),
+          const Divider(color: Colors.white24),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _updateSelectedGear(Property.teeth, (selectedGear!.teeth - 2).clamp(8, 60).toDouble()),
+                  icon: const Icon(Icons.remove, size: 16),
+                  label: const Text("Teeth"),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+                ),
               ),
-            ),
+              Padding(padding: const EdgeInsets.symmetric(horizontal: 8), child: Text("${selectedGear!.teeth}", style: const TextStyle(color: Colors.white))),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _updateSelectedGear(Property.teeth, (selectedGear!.teeth + 2).clamp(8, 60).toDouble()),
+                  icon: const Icon(Icons.add, size: 16),
+                  label: const Text(""),
+                  style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          CheckboxListTile(
+            title: const Text("Driver", style: TextStyle(color: Colors.white, fontSize: 12)),
+            value: selectedGear!.isDriver,
+            onChanged: (v) => setState(() => selectedGear!.isDriver = v!),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            activeColor: Colors.green,
+          ),
+          CheckboxListTile(
+            title: const Text("Fixed", style: TextStyle(color: Colors.white, fontSize: 12)),
+            value: selectedGear!.isFixed,
+            onChanged: (v) => setState(() => selectedGear!.isFixed = v!),
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: EdgeInsets.zero,
+            activeColor: Colors.red,
+          ),
+          const SizedBox(height: 12),
+          ElevatedButton(
+            onPressed: _deleteSelected,
+            child: const Text("Delete", style: TextStyle(fontSize: 12)),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
           ),
         ],
       ),
@@ -672,236 +292,115 @@ class _GearWorkspaceState extends State<GearWorkspace> with TickerProviderStateM
   }
 }
 
-class GearPainter extends CustomPainter {
-  final List<Gear> gears;
-  final List<GearConnection> connections;
-  final String? selectedGearId;
-  final String? connectionStartGearId;
-  final bool showTeeth;
-  final bool showConnectionLines;
+enum Property { teeth, size }
 
-  GearPainter({
-    required this.gears,
-    required this.connections,
-    required this.selectedGearId,
-    required this.connectionStartGearId,
-    required this.showTeeth,
-    required this.showConnectionLines,
+class Gear {
+  final int id;
+  double x, y;
+  int teeth;
+  double radius;
+  double angle;
+  double angularVelocity;
+  bool isDriver;
+  bool isFixed;
+  bool isReversed;
+  List<int> connectedTo;
+
+  Gear({
+    required this.id,
+    required this.x,
+    required this.y,
+    required this.teeth,
+    required this.radius,
+    required this.angle,
+    this.isDriver = false,
+    this.isFixed = false,
+    this.isReversed = false,
+    this.angularVelocity = 0,
+    required this.connectedTo,
   });
+}
+
+class GearScenePainter extends CustomPainter {
+  final List<Gear> gears;
+  final Gear? selectedGear;
+
+  GearScenePainter({required this.gears, this.selectedGear});
 
   @override
   void paint(Canvas canvas, Size size) {
-    // Draw connections first (behind gears)
-    if (showConnectionLines) {
-      _drawConnections(canvas);
+    // Draw connections
+    final linePaint = Paint()..color = Colors.cyanAccent.withOpacity(0.6)..strokeWidth = 2..style = PaintingStyle.stroke;
+    for (var g in gears) {
+      for (var connId in g.connectedTo) {
+        var other = gears.firstWhere((x) => x.id == connId, orElse: () => g);
+        if (g.id < other.id) {
+          canvas.drawLine(Offset(g.x, g.y), Offset(other.x, other.y), linePaint);
+        }
+      }
     }
-
     // Draw gears
-    for (var gear in gears) {
-      _drawGear(canvas, gear);
-    }
-
-    // Draw selection highlight
-    if (selectedGearId != null) {
-      final gear = gears.firstWhere((g) => g.id == selectedGearId, orElse: () => gears.first);
-      _drawSelectionHighlight(canvas, gear);
+    for (var g in gears) {
+      _drawGear(canvas, g);
     }
   }
 
-  void _drawConnections(Canvas canvas) {
-    final paint = Paint()
-      ..color = Colors.brown
-      ..strokeWidth = 3
-      ..style = PaintingStyle.stroke;
-
-    for (var conn in connections) {
-      final gear1 = gears.firstWhere((g) => g.id == conn.gear1Id, orElse: () => gears.first);
-      final gear2 = gears.firstWhere((g) => g.id == conn.gear2Id, orElse: () => gears.first);
-
-      if (conn.isCrossed) {
-        // Draw crossed belt
-        final path = Path();
-        path.moveTo(gear1.position.dx, gear1.position.dy);
-        path.lineTo(gear2.position.dx, gear2.position.dy);
-        canvas.drawPath(path, paint);
-      } else {
-        // Draw parallel belt
-        final dx = gear2.position.dx - gear1.position.dx;
-        final dy = gear2.position.dy - gear1.position.dy;
-        final distance = math.sqrt(dx * dx + dy * dy);
-        final angle = math.atan2(dy, dx);
-        
-        final offsetX = math.cos(angle) * gear1.radius;
-        final offsetY = math.sin(angle) * gear1.radius;
-        
-        final path = Path();
-        path.moveTo(
-          gear1.position.dx + offsetX * 0.8,
-          gear1.position.dy + offsetY * 0.8,
-        );
-        path.lineTo(
-          gear2.position.dx - offsetX * 0.8 * (gear2.radius / gear1.radius),
-          gear2.position.dy - offsetY * 0.8 * (gear2.radius / gear1.radius),
-        );
-        canvas.drawPath(path, paint);
-      }
-    }
-  }
-
-  void _drawGear(Canvas canvas, Gear gear) {
-    // Save canvas state
+  void _drawGear(Canvas canvas, Gear g) {
     canvas.save();
-    
-    // Translate to gear position and rotate
-    canvas.translate(gear.position.dx, gear.position.dy);
-    canvas.rotate(gear.angle);
+    canvas.translate(g.x, g.y);
+    canvas.rotate(g.angle);
 
-    // Gear body paint
-    final bodyPaint = Paint()
-      ..color = gear.color
+    final toothPaint = Paint()
+      ..color = g.isDriver ? Colors.orange : (g.isFixed ? Colors.grey : Colors.blueGrey)
       ..style = PaintingStyle.fill;
 
-    // Gear outline paint
-    final outlinePaint = Paint()
-      ..color = gear.color.darker()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-
-    // Draw gear body (circle)
-    canvas.drawCircle(Offset.zero, gear.radius, bodyPaint);
-    canvas.drawCircle(Offset.zero, gear.radius, outlinePaint);
-
-    // Draw teeth
-    if (showTeeth) {
-      final toothPaint = Paint()
-        ..color = gear.color.darker()
-        ..style = PaintingStyle.fill;
-
-      final toothHeight = gear.radius * 0.15;
-      final toothWidth = (2 * math.pi * gear.radius) / (gear.teethCount * 2);
-
-      for (int i = 0; i < gear.teethCount; i++) {
-        final angle = (2 * math.pi / gear.teethCount) * i;
-        
-        final outerRadius = gear.radius + toothHeight;
-        final innerRadius = gear.radius;
-        
-        final path = Path();
-        path.moveTo(
-          math.cos(angle) * innerRadius,
-          math.sin(angle) * innerRadius,
-        );
-        path.lineTo(
-          math.cos(angle - toothWidth / 2 / gear.radius) * outerRadius,
-          math.sin(angle - toothWidth / 2 / gear.radius) * outerRadius,
-        );
-        path.lineTo(
-          math.cos(angle + toothWidth / 2 / gear.radius) * outerRadius,
-          math.sin(angle + toothWidth / 2 / gear.radius) * outerRadius,
-        );
-        path.close();
-        
-        canvas.drawPath(path, toothPaint);
-      }
+    if (g == selectedGear) {
+      toothPaint.color = Colors.lightBlueAccent;
     }
 
-    // Draw center hole
-    final holePaint = Paint()
-      ..color = Colors.grey.shade300
-      ..style = PaintingStyle.fill;
-    
-    canvas.drawCircle(Offset.zero, gear.radius * 0.15, holePaint);
-    
-    // Draw center marker (to show rotation)
-    final markerPaint = Paint()
-      ..color = Colors.black
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
-    
-    canvas.drawLine(
-      const Offset(0, 0),
-      Offset(0, -gear.radius * 0.5),
-      markerPaint,
-    );
+    // Body
+    canvas.drawCircle(Offset.zero, g.radius * 0.85, Paint()..color = toothPaint.color.withOpacity(0.8)..style = PaintingStyle.fill);
 
-    // Restore canvas state
+    // Square Teeth
+    double circumference = 2 * math.pi * g.radius;
+    double toothPitch = circumference / g.teeth;
+    double toothWidth = toothPitch * 0.5;
+    double toothHeight = g.radius * 0.2;
+    double gapWidth = toothPitch - toothWidth;
+
+    for (int i = 0; i < g.teeth; i++) {
+      double angleStep = (2 * math.pi) / g.teeth;
+      double theta = i * angleStep;
+      canvas.save();
+      canvas.rotate(theta);
+      
+      // Draw rectangular tooth
+      double startAngle = -toothWidth / (2 * g.radius);
+      double endAngle = toothWidth / (2 * g.radius);
+      
+      Path toothPath = Path();
+      toothPath.moveTo(math.cos(startAngle) * g.radius * 0.85, math.sin(startAngle) * g.radius * 0.85);
+      toothPath.lineTo(math.cos(startAngle) * (g.radius + toothHeight), math.sin(startAngle) * (g.radius + toothHeight));
+      toothPath.lineTo(math.cos(endAngle) * (g.radius + toothHeight), math.sin(endAngle) * (g.radius + toothHeight));
+      toothPath.lineTo(math.cos(endAngle) * g.radius * 0.85, math.sin(endAngle) * g.radius * 0.85);
+      toothPath.close();
+      
+      canvas.drawPath(toothPath, toothPaint);
+      canvas.restore();
+    }
+
+    // Hub
+    canvas.drawCircle(Offset.zero, g.radius * 0.3, Paint()..color = Colors.white70);
+    canvas.drawCircle(Offset.zero, g.radius * 0.15, Paint()..color = Colors.black54);
+
+    // Selection ring
+    if (g == selectedGear) {
+      canvas.drawCircle(Offset.zero, g.radius * 1.15, Paint()..color = Colors.white..strokeWidth = 3..style = PaintingStyle.stroke);
+    }
+
     canvas.restore();
-
-    // Draw driver indicator (outside the rotated area)
-    if (gear.isDriver) {
-      final boltPaint = Paint()
-        ..color = Colors.amber
-        ..style = PaintingStyle.fill;
-      
-      canvas.drawCircle(
-        Offset(gear.position.dx, gear.position.dy - gear.radius - 15),
-        8,
-        boltPaint,
-      );
-      
-      final textPainter = TextPainter(
-        text: const TextSpan(
-          text: '⚡',
-          style: TextStyle(fontSize: 12),
-        ),
-        textDirection: TextDirection.ltr,
-      );
-      textPainter.layout();
-      textPainter.paint(
-        canvas,
-        Offset(
-          gear.position.dx - 6,
-          gear.position.dy - gear.radius - 21,
-        ),
-      );
-    }
-
-    // Draw fixed indicator
-    if (gear.isFixed) {
-      final textPainter = TextPainter(
-        text: const TextSpan(
-          text: '🔒',
-          style: TextStyle(fontSize: 14),
-        ),
-        textDirection: TextDirection.ltr,
-      );
-      textPainter.layout();
-      textPainter.paint(
-        canvas,
-        Offset(
-          gear.position.dx - 7,
-          gear.position.dy - 7,
-        ),
-      );
-    }
-  }
-
-  void _drawSelectionHighlight(Canvas canvas, Gear gear) {
-    final highlightPaint = Paint()
-      ..color = Colors.blue
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 3;
-
-    canvas.drawCircle(gear.position, gear.radius + 5, highlightPaint);
   }
 
   @override
-  bool shouldRepaint(covariant GearPainter oldDelegate) {
-    return oldDelegate.gears != gears ||
-           oldDelegate.connections != connections ||
-           oldDelegate.selectedGearId != selectedGearId ||
-           oldDelegate.connectionStartGearId != connectionStartGearId;
-  }
-}
-
-// Extension to get darker color
-extension ColorExtension on Color {
-  Color darker() {
-    return Color.fromRGBO(
-      (red * 0.7).round(),
-      (green * 0.7).round(),
-      (blue * 0.7).round(),
-      opacity,
-    );
-  }
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => true;
 }
