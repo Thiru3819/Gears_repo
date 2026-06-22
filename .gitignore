@@ -1,0 +1,30 @@
+```
+# Flutter/Dart specific
+.dart_tool/
+.build/
+.packages
+.pub-cache/
+pubspec.lock
+
+# Web build artifacts
+web/build/
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```
